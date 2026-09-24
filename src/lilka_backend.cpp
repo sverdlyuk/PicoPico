@@ -216,31 +216,22 @@ static void lilka_audio_task(void*) {
     // called I2S.end(), so we (re)start the I2S output here.
     I2S.begin(I2S_PHILIPS_MODE, SAMPLE_RATE, 16);
 
-    // Read volume ONCE here, not inside the hot loop. getVolume() opens NVS
-    // (Preferences) on every call; calling it per-buffer floods the serial log
-    // with "nvs_open failed: NOT_FOUND" errors and starves the system, which
-    // freezes the running cart. Refresh it only occasionally instead.
-    uint32_t vol = lilka::audio.getVolume();
-    uint16_t vol_refresh = 0;
-
     for (;;) {
-        // Re-read volume roughly once per second (every ~30 buffers).
-        if (++vol_refresh >= 30) {
-            vol = lilka::audio.getVolume();
-            vol_refresh = 0;
-        }
-
         // Regenerate ~33 ms of audio from the 4 SFX channels.
         memset(audiobuf, 0, sizeof(audiobuf));
         for (uint8_t i = 0; i < 4; i++) {
             fill_buffer(audiobuf, &channels[i], samples);
         }
 
-        // audiobuf is uint16_t but holds signed 16-bit PCM.
-        // Write each sample to both channels (L/R). Blocking write paces the loop.
+        // IMPORTANT: do NOT call lilka::audio.getVolume() here.
+        // On a fresh device the volume NVS namespace does not exist yet, so
+        // every call logs "[E][Preferences.cpp:50] nvs_open failed: NOT_FOUND".
+        // Called from this hot loop it floods the serial log and starves the
+        // system. Volume is applied purely via the fixed >> PICOPICO_AUDIO_SHIFT
+        // below; the volume wheel can be wired back in later once the NVS entry
+        // is created safely outside this loop.
         for (uint16_t s = 0; s < samples; s++) {
-            int16_t smp = (int16_t)audiobuf[s];
-            lilka::audio.adjustVolume(&smp, sizeof(smp), 16, vol);
+            const int16_t smp = (int16_t)audiobuf[s];
             const int32_t out = smp >> PICOPICO_AUDIO_SHIFT;
             I2S.write(out);   // left
             I2S.write(out);   // right
@@ -249,6 +240,10 @@ static void lilka_audio_task(void*) {
 }
 
 bool init_audio() {
+    // Build marker: print a unique line so we can tell from the serial log
+    // exactly which firmware is running (helps avoid flashing a stale .bin).
+    Serial.println("=== PICOPICO AUDIO BUILD v3 (no-nvs) ===");
+
     BaseType_t ok = xTaskCreatePinnedToCore(
         lilka_audio_task, "picopico_audio",
         4096, NULL, 1, &audioTaskHandle, 0);
