@@ -212,8 +212,11 @@ uint32_t now() {
 static void lilka_audio_task(void*) {
     const uint16_t samples = (uint16_t)SAMPLES_PER_DURATION * SAMPLES_PER_BUFFER;
 
-    // Pins are already assigned in lilka::begin(); the startup sound then
-    // called I2S.end(), so we (re)start the I2S output here.
+    // I2S is already initialized by lilka::begin() / the startup sound, so a
+    // plain I2S.begin() here fails with "Object already initialized" and no
+    // audio comes out. Release it first, then (re)start it for our output.
+    I2S.end();
+    delay(50); // small settle delay (delay() is remapped to pico_delay_ms above)
     I2S.begin(I2S_PHILIPS_MODE, SAMPLE_RATE, 16);
 
     for (;;) {
@@ -242,7 +245,7 @@ static void lilka_audio_task(void*) {
 bool init_audio() {
     // Build marker: print a unique line so we can tell from the serial log
     // exactly which firmware is running (helps avoid flashing a stale .bin).
-    Serial.println("=== PICOPICO AUDIO BUILD v3 (no-nvs) ===");
+    Serial.println("=== PICOPICO AUDIO BUILD v4 (I2S.end + no-nvs) ===");
 
     BaseType_t ok = xTaskCreatePinnedToCore(
         lilka_audio_task, "picopico_audio",
