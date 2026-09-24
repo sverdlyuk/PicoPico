@@ -209,6 +209,41 @@ uint32_t now() {
 #define PICOPICO_AUDIO_SHIFT 1
 #endif
 
+// Fill audiobuf from one channel WITHOUT racing the game thread.
+//
+// The Lua sfx() API (pico8api.c) mutates channels[] field-by-field on core 1
+// while this task runs on core 0. If we read a channel mid-update we can get a
+// new sfx pointer paired with a stale (large) offset, making fill_buffer index
+// notes[] out of range -> LoadProhibited crash. To avoid that we:
+//   1. capture the sfx pointer/id once (32-bit aligned loads are atomic),
+//   2. take a snapshot of the whole channel and run fill_buffer on the COPY,
+//      so the pointer can't change underneath the call,
+//   3. bounds-check offset so note_id stays within notes[NOTES_PER_SFX],
+//   4. commit the advanced snapshot back only if the game hasn't swapped the
+//      channel to a different sfx in the meantime (otherwise drop the buffer).
+static void mix_channel_safe(uint8_t i, uint16_t samples) {
+    SFX*    orig    = channels[i].sfx;      // atomic pointer load
+    uint8_t orig_id = channels[i].sfx_id;
+    if (orig == NULL) return;
+    if (orig->duration == 0) return;        // guard div-by-zero
+
+    Channel snap = channels[i];             // consistent-enough snapshot
+    if (snap.sfx != orig) return;           // changed while copying -> skip
+
+    // If offset is past this sfx's total length, the channel is stale/torn;
+    // skip rather than feed an out-of-range note index into fill_buffer.
+    const uint32_t total =
+        (uint32_t)SAMPLES_PER_DURATION * NOTES_PER_SFX * orig->duration;
+    if (snap.offset >= total) return;
+
+    fill_buffer(audiobuf, &snap, samples);  // operates on the local copy only
+
+    // Commit progress back only if the game still has the same sfx queued.
+    if (channels[i].sfx == orig && channels[i].sfx_id == orig_id) {
+        channels[i] = snap;                 // offset/phi advanced (or reset by fill_buffer)
+    }
+}
+
 static void lilka_audio_task(void*) {
     const uint16_t samples = (uint16_t)SAMPLES_PER_DURATION * SAMPLES_PER_BUFFER;
 
@@ -220,19 +255,16 @@ static void lilka_audio_task(void*) {
     I2S.begin(I2S_PHILIPS_MODE, SAMPLE_RATE, 16);
 
     for (;;) {
-        // Regenerate ~33 ms of audio from the 4 SFX channels.
+        // Regenerate ~33 ms of audio from the 4 SFX channels (race-safe).
         memset(audiobuf, 0, sizeof(audiobuf));
         for (uint8_t i = 0; i < 4; i++) {
-            fill_buffer(audiobuf, &channels[i], samples);
+            mix_channel_safe(i, samples);
         }
 
-        // IMPORTANT: do NOT call lilka::audio.getVolume() here.
-        // On a fresh device the volume NVS namespace does not exist yet, so
-        // every call logs "[E][Preferences.cpp:50] nvs_open failed: NOT_FOUND".
-        // Called from this hot loop it floods the serial log and starves the
-        // system. Volume is applied purely via the fixed >> PICOPICO_AUDIO_SHIFT
-        // below; the volume wheel can be wired back in later once the NVS entry
-        // is created safely outside this loop.
+        // NOTE: volume is applied purely via the fixed >> PICOPICO_AUDIO_SHIFT.
+        // We deliberately do NOT call lilka::audio.getVolume() here: on a fresh
+        // device its NVS namespace doesn't exist, spamming nvs_open errors from
+        // this hot loop.
         for (uint16_t s = 0; s < samples; s++) {
             const int16_t smp = (int16_t)audiobuf[s];
             const int32_t out = smp >> PICOPICO_AUDIO_SHIFT;
@@ -245,7 +277,7 @@ static void lilka_audio_task(void*) {
 bool init_audio() {
     // Build marker: print a unique line so we can tell from the serial log
     // exactly which firmware is running (helps avoid flashing a stale .bin).
-    Serial.println("=== PICOPICO AUDIO BUILD v4 (I2S.end + no-nvs) ===");
+    Serial.println("=== PICOPICO AUDIO BUILD v5 (race-safe mix) ===");
 
     BaseType_t ok = xTaskCreatePinnedToCore(
         lilka_audio_task, "picopico_audio",
