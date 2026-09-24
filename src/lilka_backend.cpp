@@ -204,7 +204,7 @@ uint32_t now() {
     return millis();
 }
 
-// Headroom for the 4-chanel mix: 0 = louder (may clip), 1 = safe, 2 = quieter.
+// Headroom for the 4-channel mix: 0 = louder (may clip), 1 = safe, 2 = quieter.
 #ifndef PICOPICO_AUDIO_SHIFT
 #define PICOPICO_AUDIO_SHIFT 1
 #endif
@@ -216,14 +216,25 @@ static void lilka_audio_task(void*) {
     // called I2S.end(), so we (re)start the I2S output here.
     I2S.begin(I2S_PHILIPS_MODE, SAMPLE_RATE, 16);
 
+    // Read volume ONCE here, not inside the hot loop. getVolume() opens NVS
+    // (Preferences) on every call; calling it per-buffer floods the serial log
+    // with "nvs_open failed: NOT_FOUND" errors and starves the system, which
+    // freezes the running cart. Refresh it only occasionally instead.
+    uint32_t vol = lilka::audio.getVolume();
+    uint16_t vol_refresh = 0;
+
     for (;;) {
+        // Re-read volume roughly once per second (every ~30 buffers).
+        if (++vol_refresh >= 30) {
+            vol = lilka::audio.getVolume();
+            vol_refresh = 0;
+        }
+
         // Regenerate ~33 ms of audio from the 4 SFX channels.
         memset(audiobuf, 0, sizeof(audiobuf));
         for (uint8_t i = 0; i < 4; i++) {
             fill_buffer(audiobuf, &channels[i], samples);
         }
-
-        const uint32_t vol = lilka::audio.getVolume();
 
         // audiobuf is uint16_t but holds signed 16-bit PCM.
         // Write each sample to both channels (L/R). Blocking write paces the loop.
