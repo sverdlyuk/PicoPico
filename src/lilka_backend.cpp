@@ -204,13 +204,50 @@ uint32_t now() {
     return millis();
 }
 
+// Headroom for the 4-channel mix: 0 = louder (may clip), 1 = safe, 2 = quieter.
+#ifndef PICOPICO_AUDIO_SHIFT
+#define PICOPICO_AUDIO_SHIFT 1
+#endif
+
+static void lilka_audio_task(void*) {
+    const uint16_t samples = (uint16_t)SAMPLES_PER_DURATION * SAMPLES_PER_BUFFER;
+
+    // Pins are already assigned in lilka::begin(); the startup sound then
+    // called I2S.end(), so we (re)start the I2S output here.
+    I2S.begin(I2S_PHILIPS_MODE, SAMPLE_RATE, 16);
+
+    for (;;) {
+        // Regenerate ~33 ms of audio from the 4 SFX channels.
+        memset(audiobuf, 0, sizeof(audiobuf));
+        for (uint8_t i = 0; i < 4; i++) {
+            fill_buffer(audiobuf, &channels[i], samples);
+        }
+
+        const uint32_t vol = lilka::audio.getVolume();
+
+        // audiobuf is uint16_t but holds signed 16-bit PCM.
+        // Write each sample to both channels (L/R). Blocking write paces the loop.
+        for (uint16_t s = 0; s < samples; s++) {
+            int16_t smp = (int16_t)audiobuf[s];
+            lilka::audio.adjustVolume(&smp, sizeof(smp), 16, vol);
+            const int32_t out = smp >> PICOPICO_AUDIO_SHIFT;
+            I2S.write(out);   // left
+            I2S.write(out);   // right
+        }
+    }
+}
+
 bool init_audio() {
-    // Lilka v2 has I2S audio output
-    // For simplicity, we can start with buzzer-based audio
-    // or implement full I2S support later
-    
-    Serial.println("Audio initialized (using Lilka I2S)");
-    
+    BaseType_t ok = xTaskCreatePinnedToCore(
+        lilka_audio_task, "picopico_audio",
+        4096, NULL, 1, &audioTaskHandle, 0);
+
+    if (ok != pdPASS) {
+        Serial.println("Audio: failed to create audio task");
+        return false;
+    }
+
+    Serial.println("Audio initialized (Lilka I2S, 22050/16, SFX only)");
     return true;
 }
 
