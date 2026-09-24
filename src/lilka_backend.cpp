@@ -204,7 +204,7 @@ uint32_t now() {
     return millis();
 }
 
-// Headroom for the 4-channel mix: 0 = louder (may clip), 1 = safe, 2 = quieter.
+// Headroom for the 4-chanel mix: 0 = louder (may clip), 1 = safe, 2 = quieter.
 #ifndef PICOPICO_AUDIO_SHIFT
 #define PICOPICO_AUDIO_SHIFT 1
 #endif
